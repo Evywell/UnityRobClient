@@ -1,52 +1,58 @@
-﻿using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-using System.Net;
+﻿using UnityEngine;
 using System.Net.Sockets;
 using System;
 using System.Text;
+using SimpleJSON;
+using Opcode;
+using Unity.UNetWeaver;
 
 namespace Network
 {
     public class Client : MonoBehaviour
     {
-        public static Client instance;
         public static int dataBufferSize = 4096;
 
         public string ip = "192.168.1.19";
         public int port = 8888;
-        public int myId = 0;
         public TCPClient tcpClient;
+
+        private Packet _authenticationPacket;
 
         public void ConnectToServer()
         {
             tcpClient.Connect();
         }
 
-        void Awake()
+        public void SetAuthenticationPacket(Packet packet)
         {
-            if (instance == null)
-            {
-                instance = this;
-            }
-            else if (instance != this)
-            {
-                Debug.Log("Awake Client, destroying the object...");
-                Destroy(this);
-            }
+            _authenticationPacket = packet;
         }
 
-        void Start()
+        public void IsSuccessfullyConnected()
         {
-            tcpClient = new TCPClient();
+            tcpClient.SendData(_authenticationPacket);
+        }
+
+        private void Start()
+        {
+            tcpClient = new TCPClient(this, new AuthOpcodeHandler());
         }
 
         public class TCPClient
         {
             public TcpClient socket;
 
+            private readonly OpcodeHandler handler;
+            private readonly Client client;
             private NetworkStream stream;
             private byte[] receveidBuffer;
+
+            public TCPClient(Client client, OpcodeHandler handler)
+            {
+                this.handler = handler;
+                this.client = client;
+                handler.RegisterHandler();
+            }
 
             public void Connect()
             {
@@ -57,7 +63,12 @@ namespace Network
                 };
 
                 receveidBuffer = new byte[dataBufferSize];
-                socket.BeginConnect(instance.ip, instance.port, ConnectCallback, socket);
+                socket.BeginConnect(client.ip, client.port, ConnectCallback, socket);
+            }
+
+            public void SendData(Packet packet)
+            {
+                SendData(packet.ToString());
             }
 
             public void SendData(string packet)
@@ -88,7 +99,7 @@ namespace Network
                 stream = socket.GetStream();
                 stream.BeginRead(receveidBuffer, 0, dataBufferSize, ReceiveCallback, null);
 
-                this.SendData("[0,{\"login\":\"admin\",\"password\":\"admin\"}]\n");
+                client.IsSuccessfullyConnected();
             }
 
             private void ReceiveCallback(IAsyncResult _result)
@@ -104,14 +115,26 @@ namespace Network
                     byte[] _data = new byte[_byteLength];
                     Array.Copy(receveidBuffer, _data, _byteLength);
 
-                    // Here is the data
-                    Debug.Log(Encoding.UTF8.GetString(_data, 0, _data.Length));
+                    ThreadManager.ExecuteOnMainThread(() => {
+                        string textPacket = Encoding.UTF8.GetString(_data, 0, _data.Length);
+                        JSONNode node = JSON.Parse(textPacket);
+                        int opcode = node[0];
 
+                        int leftPart = 3;
+                        if (opcode > 9)
+                        {
+                            leftPart = (int)Math.Floor(Math.Log10(opcode)) + 3;
+                        }
+                        string payload = textPacket.Substring(leftPart, textPacket.Length - leftPart - 1);
+                        handler.Handle(opcode, payload);
+                    });
+                
                     stream.BeginRead(receveidBuffer, 0, dataBufferSize, ReceiveCallback, null);
                 }
-                catch
+                catch (Exception e)
                 {
                     // Disconnect
+                    Debug.Log(e.Message);
                 }
             }
 
